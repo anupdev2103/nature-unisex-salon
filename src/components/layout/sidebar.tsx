@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
   Receipt,
+  ReceiptText,
   Users,
   Scissors,
   CreditCard,
@@ -27,6 +28,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/billing", label: "Billing", icon: Receipt },
+  { href: "/invoices", label: "Invoices", icon: ReceiptText },
   { href: "/customers", label: "Customers", icon: Users },
   { href: "/memberships", label: "Memberships", icon: CreditCard },
   { href: "/services", label: "Services", icon: Scissors, adminOnly: true },

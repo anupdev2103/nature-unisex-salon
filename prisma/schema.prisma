@@ -170,7 +170,9 @@ model Customer {
   visits      Visit[]
   couponUses  CouponRedemption[]
 
-  @@unique([phone, deletedAt]) // allow re-use of phone only after soft delete window
+  // Mobile numbers are intentionally NOT unique: family members frequently
+  // share one number. The customerCode is the unique identity. Receptionists
+  // disambiguate by picking the right person from search results.
   @@index([phone])
   @@index([name])
   @@index([registeredBranchId])

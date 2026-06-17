@@ -35,6 +35,16 @@ export const customerSchema = z.object({
   status: z.enum(["ACTIVE", "INACTIVE", "BLOCKED"]).default("ACTIVE"),
 });
 
+// Quick-add inside Billing — only Name + Mobile required.
+export const quickCustomerSchema = z.object({
+  name: z.string().trim().min(2, "Name is required"),
+  phone,
+  gender: z.enum(["MALE", "FEMALE", "OTHER"]).optional(),
+  dob: z.string().optional().or(z.literal("")),
+  notes: z.string().trim().optional().or(z.literal("")),
+  registeredBranchId: z.string().uuid("Select a branch"),
+});
+
 // ───────────────────────── Service ─────────────────────────
 export const serviceSchema = z.object({
   name: z.string().trim().min(2, "Name is required"),

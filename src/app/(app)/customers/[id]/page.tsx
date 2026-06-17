@@ -35,6 +35,20 @@ export default async function CustomerProfile({ params }: { params: Promise<{ id
 
   const branches = await prisma.branch.findMany({ where: { deletedAt: null }, select: { id: true, name: true } });
   const lifetime = customer.invoices.reduce((s, i) => s + i.grandTotal, 0);
+  const lastVisit = customer.visits[0]?.visitedAt ?? null;
+  const walletBalance = customer.memberships
+    .filter((m) => m.kind === "WALLET" && m.status === "ACTIVE")
+    .reduce((s, m) => s + m.remainingValue, 0);
+
+  // Upcoming birthday: next occurrence of the DOB month/day.
+  let birthday: { date: Date; inDays: number } | null = null;
+  if (customer.dob) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    let next = new Date(today.getFullYear(), customer.dob.getMonth(), customer.dob.getDate());
+    if (next < today) next = new Date(today.getFullYear() + 1, customer.dob.getMonth(), customer.dob.getDate());
+    birthday = { date: next, inDays: Math.round((next.getTime() - today.getTime()) / 86400000) };
+  }
 
   return (
     <div className="space-y-6">
@@ -59,11 +73,38 @@ export default async function CustomerProfile({ params }: { params: Promise<{ id
         />
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card><CardContent className="p-5"><p className="text-sm text-muted-foreground">Lifetime spend</p><p className="mt-1 text-2xl font-bold">{formatINR(lifetime)}</p></CardContent></Card>
         <Card><CardContent className="p-5"><p className="text-sm text-muted-foreground">Total visits</p><p className="mt-1 text-2xl font-bold">{customer.visits.length}</p></CardContent></Card>
-        <Card><CardContent className="p-5"><p className="text-sm text-muted-foreground">Branch</p><p className="mt-1 text-lg font-semibold">{customer.registeredBranch.name}</p></CardContent></Card>
+        <Card><CardContent className="p-5"><p className="text-sm text-muted-foreground">Last visit</p><p className="mt-1 text-lg font-semibold">{lastVisit ? formatDate(lastVisit) : "—"}</p></CardContent></Card>
+        <Card className={walletBalance > 0 ? "border-emerald-200 bg-emerald-50" : ""}>
+          <CardContent className="p-5"><p className="text-sm text-muted-foreground">Wallet balance</p><p className="mt-1 text-2xl font-bold">{formatINR(walletBalance)}</p></CardContent>
+        </Card>
       </div>
+
+      <Card>
+        <CardHeader><CardTitle>Details</CardTitle></CardHeader>
+        <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Detail label="Customer ID" value={customer.customerCode} mono />
+          <Detail label="Mobile" value={customer.phone} />
+          <Detail label="Gender" value={customer.gender ?? "—"} />
+          <Detail label="Date of birth" value={customer.dob ? formatDate(customer.dob) : "—"} />
+          <Detail label="Registered branch" value={customer.registeredBranch.name} />
+          <Detail label="Member since" value={formatDate(customer.createdAt)} />
+          <Detail
+            label="Upcoming birthday"
+            value={birthday ? `${formatDate(birthday.date)}${birthday.inDays <= 7 ? ` · in ${birthday.inDays}d 🎂` : ""}` : "—"}
+            highlight={!!birthday && birthday.inDays <= 7}
+          />
+          <Detail label="Status" value={customer.status} />
+          {customer.notes ? (
+            <div className="sm:col-span-2 lg:col-span-4">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Notes</p>
+              <p className="mt-1 text-sm">{customer.notes}</p>
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader><CardTitle>Memberships</CardTitle></CardHeader>
@@ -108,6 +149,15 @@ export default async function CustomerProfile({ params }: { params: Promise<{ id
           </Table>
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function Detail({ label, value, mono, highlight }: { label: string; value: string; mono?: boolean; highlight?: boolean }) {
+  return (
+    <div>
+      <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className={`mt-1 text-sm font-medium ${mono ? "font-mono" : ""} ${highlight ? "text-primary" : ""}`}>{value}</p>
     </div>
   );
 }

@@ -12,13 +12,13 @@ import { formatINR } from "@/lib/money";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { RevenueChart } from "@/components/dashboard/revenue-chart";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { StaffDashboard } from "./staff-dashboard";
+import { ReceptionDashboard } from "./reception-dashboard";
 
 export default async function DashboardPage() {
   const user = await requireUser();
 
   if (user.role !== "ADMIN") {
-    return <StaffDashboard branchId={user.branchId} />;
+    return <ReceptionDashboard branchId={user.branchId} />;
   }
 
   const [m, series] = await Promise.all([
