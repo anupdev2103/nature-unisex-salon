@@ -1,0 +1,520 @@
+// ════════════════════════════════════════════════════════════════════
+//  Nature Unisex Salon — Database Schema
+//  Postgres (Supabase). Source of truth for all tables, enums, indexes.
+//
+//  Design principles:
+//   - Soft delete everywhere via `deletedAt` (never hard-delete business data).
+//   - Invoices store SNAPSHOTS of service name/price so historical bills
+//     never change when a service is later renamed or repriced.
+//   - Every membership redemption writes a MembershipLedger row.
+//   - All monetary values are stored in PAISE (integer) to avoid float drift.
+//     ₹1 = 100 paise. Format to rupees only at the presentation layer.
+//   - AuditLog records every mutating action by a user.
+// ════════════════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────── ENUMS ───────────────────────────
+
+enum UserRole {
+  ADMIN
+  STAFF
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+enum MembershipKind {
+  WALLET // Type A — pay X, get Y value to spend
+  UNLIMITED // Type B — flat fee, unlimited of a benefit for a period
+}
+
+enum MembershipStatus {
+  ACTIVE
+  EXPIRED
+  EXHAUSTED // wallet emptied
+  CANCELLED
+}
+
+enum LedgerDirection {
+  CREDIT // value added (purchase, bonus, top-up, refund)
+  DEBIT // value consumed (redemption against an invoice)
+}
+
+enum LedgerReason {
+  PURCHASE
+  BONUS
+  REDEMPTION
+  TOPUP
+  REFUND
+  ADJUSTMENT
+  EXPIRY
+}
+
+enum CouponType {
+  FIXED // fixed amount off
+}
+
+enum CouponStatus {
+  ACTIVE
+  DISABLED
+  EXPIRED
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+  CARD
+  BANK_TRANSFER
+}
+
+enum InvoiceStatus {
+  PAID
+  VOID
+}
+
+enum DiscountScope {
+  INVOICE
+  ITEM
+}
+
+// ─────────────────────────── CORE ───────────────────────────
+
+/// Salon branches. Disable instead of delete.
+model Branch {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  code      String   @unique // short code used in invoice numbers, e.g. SNG
+  address   String?
+  phone     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  deletedAt DateTime? @db.Timestamptz(6)
+
+  users               User[]
+  customers           Customer[]
+  invoices            Invoice[]
+  invoiceCounters     InvoiceCounter[]
+  customerMemberships CustomerMembership[]
+
+  @@index([isActive])
+  @@map("branches")
+}
+
+/// App users. `id` mirrors Supabase auth.users.id (the auth uuid).
+model User {
+  id        String     @id @db.Uuid // == auth.users.id
+  email     String     @unique
+  fullName  String
+  role      UserRole   @default(STAFF)
+  status    UserStatus @default(ACTIVE)
+  phone     String?
+  branchId  String?    @db.Uuid
+  branch    Branch?    @relation(fields: [branchId], references: [id])
+  createdAt DateTime   @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime   @updatedAt @db.Timestamptz(6)
+  deletedAt DateTime?  @db.Timestamptz(6)
+
+  invoicesAsStaff Invoice[]            @relation("InvoiceStaff")
+  ledgerEntries   MembershipLedger[]   @relation("LedgerCreatedBy")
+  discounts       InvoiceDiscount[]
+  auditLogs       AuditLog[]
+  membershipsSold CustomerMembership[] @relation("MembershipSoldBy")
+
+  @@index([role])
+  @@index([branchId])
+  @@map("users")
+}
+
+/// Customers. NEVER hard-deleted (soft delete only).
+model Customer {
+  id                 String         @id @default(uuid()) @db.Uuid
+  customerCode       String         @unique // human-friendly id, e.g. CUST-000123
+  name               String
+  phone              String
+  gender             Gender?
+  dob                DateTime?      @db.Date
+  notes              String?
+  status             CustomerStatus @default(ACTIVE)
+  registeredBranchId String         @db.Uuid
+  registeredBranch   Branch         @relation(fields: [registeredBranchId], references: [id])
+  createdAt          DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime       @updatedAt @db.Timestamptz(6)
+  deletedAt          DateTime?      @db.Timestamptz(6)
+
+  invoices    Invoice[]
+  memberships CustomerMembership[]
+  visits      Visit[]
+  couponUses  CouponRedemption[]
+
+  @@unique([phone, deletedAt]) // allow re-use of phone only after soft delete window
+  @@index([phone])
+  @@index([name])
+  @@index([registeredBranchId])
+  @@index([status])
+  @@map("customers")
+}
+
+// ─────────────────────────── SERVICES ───────────────────────────
+
+model ServiceCategory {
+  id        String    @id @default(uuid()) @db.Uuid
+  name      String    @unique
+  sortOrder Int       @default(0)
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt DateTime? @db.Timestamptz(6)
+
+  services Service[]
+
+  @@map("service_categories")
+}
+
+model Service {
+  id         String           @id @default(uuid()) @db.Uuid
+  name       String
+  categoryId String?          @db.Uuid
+  category   ServiceCategory? @relation(fields: [categoryId], references: [id])
+  price      Int // paise
+  durationMin Int             @default(30)
+  isActive   Boolean          @default(true)
+  createdAt  DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime         @updatedAt @db.Timestamptz(6)
+  deletedAt  DateTime?        @db.Timestamptz(6)
+
+  invoiceItems InvoiceItem[]
+
+  @@index([isActive])
+  @@index([categoryId])
+  @@map("services")
+}
+
+// ─────────────────────────── MEMBERSHIPS ───────────────────────────
+
+/// Reusable membership product definitions configured by the admin.
+model MembershipPlan {
+  id        String         @id @default(uuid()) @db.Uuid
+  name      String
+  kind      MembershipKind
+  // WALLET fields
+  price       Int? // amount customer pays (paise)
+  walletValue Int? // total spendable value granted (paise) — includes bonus
+  // UNLIMITED fields
+  flatPrice    Int? // paise
+  benefitLabel String? // e.g. "Unlimited Haircut"
+  // shared
+  validityDays Int
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt    DateTime? @db.Timestamptz(6)
+
+  memberships CustomerMembership[]
+
+  @@index([kind])
+  @@index([isActive])
+  @@map("membership_plans")
+}
+
+/// A membership instance owned by a customer. NEVER hard-deleted.
+model CustomerMembership {
+  id               String           @id @default(uuid()) @db.Uuid
+  membershipNumber String           @unique // e.g. MEM-000045
+  customerId       String           @db.Uuid
+  customer         Customer         @relation(fields: [customerId], references: [id])
+  planId           String           @db.Uuid
+  plan             MembershipPlan   @relation(fields: [planId], references: [id])
+  branchId         String           @db.Uuid
+  branch           Branch           @relation(fields: [branchId], references: [id])
+  kind             MembershipKind
+  status           MembershipStatus @default(ACTIVE)
+
+  // WALLET accounting (paise)
+  purchaseValue  Int @default(0) // what they paid
+  bonusValue     Int @default(0) // free top-up
+  totalValue     Int @default(0) // purchase + bonus at issuance
+  remainingValue Int @default(0) // live balance, mutated by ledger
+
+  // UNLIMITED accounting
+  usageCount    Int @default(0) // number of times benefit used
+  valueConsumed Int @default(0) // notional value of benefit consumed (paise)
+
+  startDate DateTime  @default(now()) @db.Timestamptz(6)
+  expiryDate DateTime @db.Timestamptz(6)
+
+  soldById String? @db.Uuid
+  soldBy   User?   @relation("MembershipSoldBy", fields: [soldById], references: [id])
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt DateTime? @db.Timestamptz(6)
+
+  ledger   MembershipLedger[]
+  invoices Invoice[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([kind])
+  @@index([expiryDate])
+  @@map("customer_memberships")
+}
+
+/// Immutable ledger. One row per value movement. Append-only.
+model MembershipLedger {
+  id           String             @id @default(uuid()) @db.Uuid
+  membershipId String             @db.Uuid
+  membership   CustomerMembership @relation(fields: [membershipId], references: [id])
+  direction    LedgerDirection
+  reason       LedgerReason
+  amount       Int // paise, always positive; direction gives the sign
+  balanceAfter Int // remainingValue after this entry (paise)
+  invoiceId    String?            @db.Uuid
+  invoice      Invoice?           @relation(fields: [invoiceId], references: [id])
+  note         String?
+  createdById  String?            @db.Uuid
+  createdBy    User?              @relation("LedgerCreatedBy", fields: [createdById], references: [id])
+  createdAt    DateTime           @default(now()) @db.Timestamptz(6)
+
+  @@index([membershipId])
+  @@index([invoiceId])
+  @@index([createdAt])
+  @@map("membership_ledger")
+}
+
+// ─────────────────────────── COUPONS ───────────────────────────
+
+model Coupon {
+  id         String       @id @default(uuid()) @db.Uuid
+  code       String       @unique
+  type       CouponType   @default(FIXED)
+  amount     Int // paise off
+  expiryDate DateTime?    @db.Timestamptz(6)
+  status     CouponStatus @default(ACTIVE)
+  usageLimit Int? // null = unlimited
+  usageCount Int          @default(0)
+  minBillAmount Int       @default(0) // minimum bill (paise) to qualify
+  createdAt  DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime     @updatedAt @db.Timestamptz(6)
+  deletedAt  DateTime?    @db.Timestamptz(6)
+
+  redemptions CouponRedemption[]
+
+  @@index([status])
+  @@map("coupons")
+}
+
+model CouponRedemption {
+  id         String   @id @default(uuid()) @db.Uuid
+  couponId   String   @db.Uuid
+  coupon     Coupon   @relation(fields: [couponId], references: [id])
+  invoiceId  String   @db.Uuid
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id])
+  customerId String   @db.Uuid
+  customer   Customer @relation(fields: [customerId], references: [id])
+  amount     Int // paise actually applied
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([couponId])
+  @@index([invoiceId])
+  @@map("coupon_redemptions")
+}
+
+// ─────────────────────────── BILLING ───────────────────────────
+
+/// Per-branch monotonic invoice counter for gapless sequential numbering.
+model InvoiceCounter {
+  id       String @id @default(uuid()) @db.Uuid
+  branchId String @db.Uuid
+  branch   Branch @relation(fields: [branchId], references: [id])
+  period   String // "YYYY" or "YYYYMM" bucket
+  lastSeq  Int    @default(0)
+
+  @@unique([branchId, period])
+  @@map("invoice_counters")
+}
+
+model Invoice {
+  id            String        @id @default(uuid()) @db.Uuid
+  invoiceNumber String        @unique // e.g. SNG/2026/000123
+  branchId      String        @db.Uuid
+  branch        Branch        @relation(fields: [branchId], references: [id])
+  customerId    String        @db.Uuid
+  customer      Customer      @relation(fields: [customerId], references: [id])
+  staffId       String        @db.Uuid
+  staff         User          @relation("InvoiceStaff", fields: [staffId], references: [id])
+
+  // Snapshot of customer identity at bill time (never changes)
+  customerNameSnapshot  String
+  customerPhoneSnapshot String
+
+  // Money — all paise
+  subtotal          Int // sum of line totals before any reduction
+  itemDiscountTotal Int @default(0)
+  billDiscountTotal Int @default(0)
+  couponTotal       Int @default(0)
+  membershipApplied Int @default(0) // value paid via wallet membership
+  taxableAmount     Int @default(0)
+  taxAmount         Int @default(0)
+  taxRatePctBps     Int @default(0) // GST rate in basis points (e.g. 1800 = 18%)
+  grandTotal        Int // net payable after discounts/coupon/membership
+  amountDue         Int @default(0) // grandTotal - sum(payments)
+
+  paymentMethod PaymentMethod
+  status        InvoiceStatus @default(PAID)
+
+  // Membership linkage (wallet OR unlimited used on this bill)
+  membershipId String?             @db.Uuid
+  membership   CustomerMembership? @relation(fields: [membershipId], references: [id])
+
+  pdfUrl    String?
+  notes     String?
+  voidedAt  DateTime? @db.Timestamptz(6)
+  voidReason String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  items       InvoiceItem[]
+  payments    Payment[]
+  discounts   InvoiceDiscount[]
+  couponUses  CouponRedemption[]
+  ledgerLinks MembershipLedger[]
+  visit       Visit?
+
+  @@index([branchId])
+  @@index([customerId])
+  @@index([staffId])
+  @@index([createdAt])
+  @@index([status])
+  @@index([membershipId])
+  @@map("invoices")
+}
+
+/// Line items hold a FULL SNAPSHOT of the service so re-pricing never
+/// alters historical bills.
+model InvoiceItem {
+  id        String  @id @default(uuid()) @db.Uuid
+  invoiceId String  @db.Uuid
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  serviceId          String?  @db.Uuid // nullable so deleted services don't break history
+  service            Service? @relation(fields: [serviceId], references: [id])
+  serviceNameSnapshot String
+  unitPriceSnapshot   Int // paise at time of sale
+  quantity            Int     @default(1)
+  lineDiscount        Int     @default(0) // paise off this line
+  membershipBenefit   Boolean @default(false) // covered by unlimited membership
+  lineTotal           Int // (unitPrice*qty) - lineDiscount, 0 if membershipBenefit
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([invoiceId])
+  @@index([serviceId])
+  @@map("invoice_items")
+}
+
+model Payment {
+  id        String        @id @default(uuid()) @db.Uuid
+  invoiceId String        @db.Uuid
+  invoice   Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  method    PaymentMethod
+  amount    Int // paise
+  reference String? // UPI ref / card last4 / txn id
+  createdAt DateTime      @default(now()) @db.Timestamptz(6)
+
+  @@index([invoiceId])
+  @@map("payments")
+}
+
+model InvoiceDiscount {
+  id        String        @id @default(uuid()) @db.Uuid
+  invoiceId String        @db.Uuid
+  invoice   Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  scope     DiscountScope @default(INVOICE)
+  amount    Int // paise
+  reason    String
+  staffId   String        @db.Uuid
+  staff     User          @relation(fields: [staffId], references: [id])
+  createdAt DateTime      @default(now()) @db.Timestamptz(6)
+
+  @@index([invoiceId])
+  @@index([staffId])
+  @@map("invoice_discounts")
+}
+
+/// Denormalized visit record (one per paid invoice) for fast visit history.
+model Visit {
+  id         String   @id @default(uuid()) @db.Uuid
+  customerId String   @db.Uuid
+  customer   Customer @relation(fields: [customerId], references: [id])
+  invoiceId  String   @unique @db.Uuid
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id])
+  branchId   String   @db.Uuid
+  amount     Int // grandTotal snapshot (paise)
+  visitedAt  DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([customerId])
+  @@index([branchId])
+  @@index([visitedAt])
+  @@map("visits")
+}
+
+// ─────────────────────────── SETTINGS & AUDIT ───────────────────────────
+
+/// Singleton settings row (id is fixed to "global").
+model Setting {
+  id            String   @id @default("global")
+  salonName     String   @default("Nature Unisex Salon")
+  gstNumber     String?
+  invoicePrefix String   @default("NUS")
+  logoUrl       String?
+  address       String?
+  whatsappNumber String?
+  email         String?
+  taxRatePctBps Int      @default(0) // default GST rate in basis points
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("settings")
+}
+
+/// Append-only audit trail of every mutating action.
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  actorId   String?  @db.Uuid
+  actor     User?    @relation(fields: [actorId], references: [id])
+  action    String // e.g. "invoice.create", "service.update"
+  entity    String // table/model name
+  entityId  String?
+  before    Json?
+  after     Json?
+  ip        String?
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([actorId])
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
