@@ -1,7 +1,9 @@
+import { Suspense } from "react";
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
+import { NavigationProgress } from "@/components/layout/navigation-progress";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireUser();
@@ -11,6 +13,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="flex h-screen overflow-hidden">
+      <Suspense fallback={null}>
+        <NavigationProgress />
+      </Suspense>
       <Sidebar role={user.role} />
       <div className="flex flex-1 flex-col overflow-hidden">
         <Topbar name={user.fullName} role={user.role} branch={branch?.name} />

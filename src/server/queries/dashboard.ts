@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { startOfDay, startOfMonth } from "date-fns";
 
@@ -116,24 +117,31 @@ export async function getDashboardMetrics(branchId?: string) {
   };
 }
 
-/** Daily revenue series for the last N days (for the dashboard chart). */
+/**
+ * Daily revenue series for the last N days. Aggregated DB-side (one grouped
+ * row per day instead of every invoice), then zero-filled for empty days.
+ */
 export async function getRevenueSeries(days = 30, branchId?: string) {
   const since = startOfDay(new Date());
   since.setDate(since.getDate() - (days - 1));
-  const invoices = await prisma.invoice.findMany({
-    where: { status: "PAID", createdAt: { gte: since }, ...(branchId ? { branchId } : {}) },
-    select: { createdAt: true, grandTotal: true },
-  });
 
-  const buckets = new Map<string, number>();
+  const rows = branchId
+    ? await prisma.$queryRaw<{ day: string; revenue: number }[]>(Prisma.sql`
+        select to_char(("createdAt" at time zone 'Asia/Kolkata')::date, 'YYYY-MM-DD') as day, sum("grandTotal")::int as revenue
+        from invoices where status = 'PAID' and "createdAt" >= ${since} and "branchId" = ${branchId}::uuid
+        group by 1`)
+    : await prisma.$queryRaw<{ day: string; revenue: number }[]>(Prisma.sql`
+        select to_char(("createdAt" at time zone 'Asia/Kolkata')::date, 'YYYY-MM-DD') as day, sum("grandTotal")::int as revenue
+        from invoices where status = 'PAID' and "createdAt" >= ${since}
+        group by 1`);
+
+  const byDay = new Map(rows.map((r) => [r.day, r.revenue]));
+  const out: { date: string; revenue: number }[] = [];
   for (let i = 0; i < days; i++) {
     const d = new Date(since);
     d.setDate(since.getDate() + i);
-    buckets.set(d.toISOString().slice(0, 10), 0);
+    const key = d.toISOString().slice(0, 10);
+    out.push({ date: key, revenue: byDay.get(key) ?? 0 });
   }
-  for (const inv of invoices) {
-    const key = inv.createdAt.toISOString().slice(0, 10);
-    buckets.set(key, (buckets.get(key) ?? 0) + inv.grandTotal);
-  }
-  return [...buckets.entries()].map(([date, revenue]) => ({ date, revenue }));
+  return out;
 }
