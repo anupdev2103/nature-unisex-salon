@@ -58,3 +58,20 @@
     font-feature-settings: "rlig" 1, "calt" 1;
   }
 }
+
+/* Clean printing for reports — hide app chrome, expand content. */
+@media print {
+  aside,
+  header,
+  .print\:hidden {
+    display: none !important;
+  }
+  main {
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+  html,
+  body {
+    height: auto !important;
+  }
+}
